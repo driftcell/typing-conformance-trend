@@ -355,7 +355,8 @@ def plot_preview(records: list[Record], eras: list[SuiteEra], hidden: set[str]) 
             linewidth=2,
             label=checker,
         )
-    ax.set_ylim(0, 105)
+    ymin = int(min(r.pass_rate for recs in by_checker.values() for r in recs) // 10 * 10)
+    ax.set_ylim(ymin, 105)
     ax.set_title(SITE_TITLE, fontsize=22)
     ax.set_ylabel("Pass rate (%)", fontsize=15)
     ax.tick_params(labelsize=12)
@@ -501,8 +502,8 @@ __SNAPSHOT_ROWS__
         const dataRange = [Math.min(...dataX), Math.max(...dataX)];
 
         function viewRange() {
-            const xa = gd.layout.xaxis || {};
-            if (xa.range && !xa.autorange) return xa.range.map(v => new Date(v).getTime());
+            const xa = gd.layout && gd.layout.xaxis; // no .layout before the first render
+            if (xa && xa.range && !xa.autorange) return xa.range.map(v => new Date(v).getTime());
             return dataRange;
         }
 
@@ -532,7 +533,9 @@ __SNAPSHOT_ROWS__
 
         const layout = {
             xaxis: { title: "Date" },
-            yaxis: { title: "Pass rate (%)", range: [0, 105] },
+            // Autorange: fits the visible lines and re-fits when legend-only
+            // traces are toggled on.
+            yaxis: { title: "Pass rate (%)" },
             hovermode: "closest",
             margin: { t: 20 },
             legend: { orientation: "v" },
