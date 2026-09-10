@@ -324,7 +324,14 @@ def results_srcdoc(sha: str) -> str:
     style = soup.find("style")
     # Newer pages wrap the table in <main>; older ones used div.table_container.
     table = soup.find("main") or soup.find("div", class_="table_container") or soup.find("table")
-    doc = f'<!DOCTYPE html><html><head><meta charset="utf-8">{style}</head><body>{table}</body></html>'
+    # The suite's stylesheet follows the device theme via light-dark(); this page
+    # is light-only, so pin the embedded table to light to match. Our override
+    # comes last, winning over the suite's ":root { color-scheme: light dark }".
+    force_light = "<style>:root { color-scheme: light; }</style>"
+    doc = (
+        f'<!DOCTYPE html><html><head><meta charset="utf-8">{style}{force_light}</head>'
+        f"<body>{table}</body></html>"
+    )
     return doc.replace("&", "&amp;").replace('"', "&quot;")
 
 
