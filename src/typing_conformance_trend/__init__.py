@@ -315,6 +315,19 @@ def _latest_per_checker(records: list[Record]) -> dict[str, Record]:
     return latest
 
 
+def results_srcdoc(sha: str) -> str:
+    """Build an iframe srcdoc document holding only the per-test results table
+    of the given run (the suite's own styles included, its page header/blurb
+    and theme-switcher script excluded), HTML-escaped for use as a
+    double-quoted attribute value."""
+    soup = BeautifulSoup((HTML_DIR / f"{sha}.html").read_text(encoding="utf-8"), "html.parser")
+    style = soup.find("style")
+    # Newer pages wrap the table in <main>; older ones used div.table_container.
+    table = soup.find("main") or soup.find("div", class_="table_container") or soup.find("table")
+    doc = f'<!DOCTYPE html><html><head><meta charset="utf-8">{style}</head><body>{table}</body></html>'
+    return doc.replace("&", "&amp;").replace('"', "&quot;")
+
+
 def hidden_checkers(records: list[Record], raw_records: list[Record]) -> set[str]:
     """Checkers hidden by default: retired from the suite, plus HIDDEN_BY_DEFAULT."""
     latest_sha = max(raw_records, key=lambda r: r.when).sha
@@ -400,6 +413,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
         p { margin: 0.4rem 0; color: #444; font-size: 0.95rem; line-height: 1.6; }
         #chart { width: 100%; height: 75vh; min-height: 400px; }
+        #results-frame { width: 100%; border: 1px solid #e2e2e2; border-radius: 4px; }
         table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.95rem; }
         th, td { padding: 0.35rem 1rem; text-align: left; border-bottom: 1px solid #e2e2e2; }
         th { color: #555; font-weight: 600; }
@@ -429,16 +443,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <main>
         <section>
             <h2>Latest results</h2>
-            <p>Pass rates from the most recent published conformance run
-            (<time datetime="__AS_OF__">__AS_OF__</time>):</p>
-            <table>
-                <thead>
-                    <tr><th>#</th><th>Type checker</th><th>Version</th><th>Pass rate</th></tr>
-                </thead>
-                <tbody>
-__SNAPSHOT_ROWS__
-                </tbody>
-            </table>
+            <p>The full results table of the most recent published conformance run
+            (<time datetime="__AS_OF__">__AS_OF__</time>), as published in
+            <a href="https://github.com/__REPO__/blob/main/__RESULTS_PATH__">__RESULTS_PATH__</a>
+            &mdash; one row per test case, one column per type checker:</p>
+            <iframe id="results-frame" srcdoc="__RESULTS_SRCDOC__"
+                title="Conformance test results, one row per test case"
+                height="480" loading="lazy"></iframe>
             <p class="note">__RETIRED__ also appeared in the suite in the past but were removed
             later; their lines are hidden by default (click a legend entry to show one).</p>
         </section>
@@ -553,6 +564,13 @@ __SNAPSHOT_ROWS__
                 Plotly.relayout(gd, { annotations: next }).then(() => { updating = false; });
             });
         });
+
+        // The embedded results table is same-origin (srcdoc), so the iframe
+        // can be sized to its content once loaded.
+        const frame = document.getElementById("results-frame");
+        frame.addEventListener("load", () => {
+            frame.style.height = frame.contentDocument.documentElement.scrollHeight + "px";
+        });
     </script>
 </body>
 </html>
@@ -590,18 +608,13 @@ def write_html(
         for era in eras
     ]
 
-    # Latest snapshot table: checkers present in the newest commit's results.
+    # Latest snapshot: checkers present in the newest commit's results, whose
+    # full per-test table is embedded below the chart.
     latest_sha = max(raw_records, key=lambda r: r.when).sha
     current = {r.checker for r in raw_records if r.sha == latest_sha}
     latest = _latest_per_checker(records)
-    snapshot = sorted((latest[c] for c in current), key=lambda r: r.pass_rate, reverse=True)
-    rows = "\n".join(
-        f'                    <tr><td>{i}</td><td>{r.checker}</td>'
-        f"<td>{r.version}</td><td class=\"rate\">{r.pass_rate:.1f}%</td></tr>"
-        for i, r in enumerate(snapshot, 1)
-    )
     retired = ", ".join(sorted(set(latest) - current)) or "None"
-    as_of = max(r.when for r in snapshot).date().isoformat()
+    as_of = max(r.when for r in raw_records).date().isoformat()
 
     jsonld = json.dumps(
         {
@@ -627,7 +640,7 @@ def write_html(
     for key, value in {
         "__DATA__": json.dumps(payload),
         "__ERAS__": json.dumps(eras_payload),
-        "__SNAPSHOT_ROWS__": rows,
+        "__RESULTS_SRCDOC__": results_srcdoc(latest_sha),
         "__RETIRED__": retired,
         "__AS_OF__": as_of,
         "__JSONLD__": jsonld,
