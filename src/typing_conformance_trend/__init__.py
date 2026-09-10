@@ -3,11 +3,13 @@
 Data source: the git history of ``conformance/results/results.html`` in the
 `python/typing <https://github.com/python/typing>`_ repository.
 
-For every commit touching that file we download the file, extract each type
-checker's version and pass rate, and keep one data point per
-``(checker, date, version)`` — the latest commit of that day. The data points
-are saved to ``trend.csv`` and rendered into a self-contained, interactive
-``index.html`` (Plotly.js via CDN) that can be served with GitHub Pages.
+For every commit touching that file we download the file and extract each
+type checker's version and pass rate. Per checker we keep one point per day
+and version (the latest commit of that day), then drop points that repeat
+the previous point's version and pass rate — a point on the chart means the
+checker's version or its pass rate changed. The data points are saved to
+``trend.csv`` and rendered into a self-contained, interactive ``index.html``
+(Plotly.js via CDN) that can be served with GitHub Pages.
 """
 
 from __future__ import annotations
@@ -207,6 +209,23 @@ def dedupe(records: list[Record]) -> list[Record]:
     return sorted(latest.values(), key=lambda r: (r.when, r.checker))
 
 
+def drop_repeats(records: list[Record]) -> list[Record]:
+    """Drop points that carry no new information, i.e. both the checker's
+    version and its pass rate are identical to the previous kept point."""
+    by_checker: dict[str, list[Record]] = {}
+    for rec in records:
+        by_checker.setdefault(rec.checker, []).append(rec)
+    kept: list[Record] = []
+    for recs in by_checker.values():
+        prev: Record | None = None
+        for rec in sorted(recs, key=lambda r: r.when):
+            if prev and rec.version == prev.version and round(rec.pass_rate, 6) == round(prev.pass_rate, 6):
+                continue
+            kept.append(rec)
+            prev = rec
+    return sorted(kept, key=lambda r: (r.when, r.checker))
+
+
 def write_csv(records: list[Record]) -> None:
     with CSV_PATH.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -236,7 +255,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <header>
         <h1>Python typing conformance test pass rate over time</h1>
         <p>
-            One data point per (type checker, date, version), extracted from the history of
+            A point is added whenever a type checker's version or pass rate changes, based on the history of
             <a href="https://github.com/__REPO__/commits/main/__RESULTS_PATH__">__RESULTS_PATH__</a>
             in <a href="https://github.com/__REPO__">__REPO__</a>.
             Hover a point for details, click legend entries to toggle lines, drag to zoom.
@@ -302,6 +321,6 @@ def write_html(records: list[Record]) -> None:
 
 
 def main() -> None:
-    records = dedupe(collect_records())
+    records = drop_repeats(dedupe(collect_records()))
     write_csv(records)
     write_html(records)

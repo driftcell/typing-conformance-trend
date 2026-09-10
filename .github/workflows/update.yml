@@ -27,7 +27,7 @@ jobs:
           restore-keys: typing-results-
 
       - name: Rebuild data and chart
-        run: uv run python-typing-result-trend
+        run: uv run typing-conformance-trend
 
       - name: Commit and push if changed
         run: |

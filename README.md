@@ -1,34 +1,19 @@
-# python-typing-result-trend
+# Typing Conformance Trend
 
-Interactive trend chart of [Python typing conformance test](https://typing.python.org/en/latest/conformance/results.html) pass rates, built from the git history of
-[`conformance/results/results.html`](https://github.com/python/typing/commits/main/conformance/results/results.html) in `python/typing`.
+An interactive trend chart showing how well popular Python type checkers conform to the official
+[Python typing specification conformance test suite](https://typing.python.org/en/latest/conformance/results.html) over time.
 
-- X axis: commit date; Y axis: pass rate (%)
-- One data point per (type checker, date, version) — the latest commit of that day
-- Pass rate = (Pass + 0.5 × Partial) / total, matching the suite's own convention
+**[View the live chart](https://driftcell.github.io/typing-conformance-trend/)**
 
-## Usage
+Each line is one type checker (mypy, pyright, ty, zuban, pyrefly, …). Hover a point to see the exact checker version, pass rate, and the commit it came from; click legend entries to toggle lines; drag to zoom.
 
-```sh
-uv run python-typing-result-trend
-```
+## How the data is built
 
-Outputs:
+- Source: the full git history of
+  [`conformance/results/results.html`](https://github.com/python/typing/commits/main/conformance/results/results.html) in [python/typing](https://github.com/python/typing).
+- X axis: commit date. Y axis: pass rate (%).
+- A point is added whenever a checker's version or pass rate changes (within a day, the latest commit wins), so flat segments stay clean.
+- Pass rate = (Pass + 0.5 × Partial) / total tests, matching the suite's own scoring convention.
+- Note: the test suite itself grows over time (from 42 to 145+ tests), so pass rates across distant dates are not strictly comparable.
 
-- `index.html` — self-contained interactive chart (Plotly.js via CDN); hover points for version/commit details, click the legend to toggle lines
-- `trend.csv` — the extracted data points
-- `data/` — local cache of downloaded `results.html` snapshots (safe to delete; will be re-downloaded)
-
-## Publish with GitHub Pages
-
-The generated `index.html` is fully static and can be served as-is:
-
-1. Commit `index.html` and push this repository to GitHub.
-2. In the GitHub repo: **Settings → Pages → Build and deployment**, choose **Deploy from a branch**, then select branch `main` and folder `/ (root)`.
-3. After a minute the chart is live at `https://<your-user>.github.io/<repo>/`.
-
-Re-run the script and push again to refresh the chart with new conformance results.
-
-## Automatic updates
-
-[`.github/workflows/update.yml`](.github/workflows/update.yml) rebuilds and pushes `index.html` / `trend.csv` every Monday (UTC), keeping the published chart up to date. It can also be triggered manually via **Actions → Update trend chart → Run workflow**. The `data/` download cache is reused between runs, so only new commits are fetched.
+The chart is regenerated and republished automatically every Monday (UTC) via GitHub Actions.

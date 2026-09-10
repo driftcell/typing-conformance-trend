@@ -1,5 +1,5 @@
 [project]
-name = "python-typing-result-trend"
+name = "typing-conformance-trend"
 version = "0.1.0"
 description = "Interactive trend chart of python/typing conformance test pass rates"
 readme = "README.md"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-python-typing-result-trend = "python_typing_result_trend:main"
+typing-conformance-trend = "typing_conformance_trend:main"
 
 [build-system]
 requires = ["uv_build>=0.12.7,<0.13.0"]
