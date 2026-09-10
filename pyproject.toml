@@ -1,0 +1,20 @@
+[project]
+name = "python-typing-result-trend"
+version = "0.1.0"
+description = "Interactive trend chart of python/typing conformance test pass rates"
+readme = "README.md"
+authors = [
+    { name = "Driftcell", email = "fuzj@cingta.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+python-typing-result-trend = "python_typing_result_trend:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
