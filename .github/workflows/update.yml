@@ -31,12 +31,12 @@ jobs:
 
       - name: Commit and push if changed
         run: |
-          if [[ -z "$(git status --porcelain index.html trend.csv)" ]]; then
+          if [[ -z "$(git status --porcelain index.html trend.csv preview.png robots.txt sitemap.xml)" ]]; then
             echo "No changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html trend.csv
+          git add index.html trend.csv preview.png robots.txt sitemap.xml
           git commit -m "Update typing conformance trend ($(date -u +%F))"
           git push

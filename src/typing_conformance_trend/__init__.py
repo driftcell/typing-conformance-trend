@@ -7,9 +7,15 @@ For every commit touching that file we download the file and extract each
 type checker's version and pass rate. Per checker we keep one point per day
 and version (the latest commit of that day), then drop points that repeat
 the previous point's version and pass rate — a point on the chart means the
-checker's version or its pass rate changed. The data points are saved to
-``trend.csv`` and rendered into a self-contained, interactive ``index.html``
-(Plotly.js via CDN) that can be served with GitHub Pages.
+checker's version or its pass rate changed.
+
+Outputs:
+- ``index.html`` — self-contained interactive chart (Plotly.js basic bundle
+  via CDN) with SEO meta tags, JSON-LD structured data and a crawlable
+  latest-results table; ready to be served with GitHub Pages.
+- ``trend.csv`` — all data points.
+- ``preview.png`` — static chart image used as Open Graph preview.
+- ``robots.txt`` / ``sitemap.xml``.
 """
 
 from __future__ import annotations
@@ -22,6 +28,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import requests
 from bs4 import BeautifulSoup
 
@@ -30,11 +42,22 @@ RESULTS_PATH = "conformance/results/results.html"
 API_URL = f"https://api.github.com/repos/{REPO}/commits"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}"
 
+SITE_URL = "https://driftcell.github.io/typing-conformance-trend/"
+SITE_REPO_URL = "https://github.com/driftcell/typing-conformance-trend"
+SITE_TITLE = "Python Type Checker Conformance Trend"
+SITE_DESCRIPTION = (
+    "How mypy, pyright, ty, zuban, pyrefly and other Python type checkers score "
+    "on the official typing specification conformance test suite over time."
+)
+
 DATA_DIR = Path("data")
 HTML_DIR = DATA_DIR / "html"
 COMMITS_JSON = DATA_DIR / "commits.json"
 CSV_PATH = Path("trend.csv")
 HTML_PATH = Path("index.html")
+PREVIEW_PATH = Path("preview.png")
+ROBOTS_PATH = Path("robots.txt")
+SITEMAP_PATH = Path("sitemap.xml")
 
 PASS_CLASSES = {"conformant"}
 PARTIAL_CLASSES = {"partially-conformant"}
@@ -235,33 +258,130 @@ def write_csv(records: list[Record]) -> None:
     print(f"wrote {CSV_PATH} ({len(records)} data points)")
 
 
+def _latest_per_checker(records: list[Record]) -> dict[str, Record]:
+    latest: dict[str, Record] = {}
+    for rec in records:
+        if rec.checker not in latest or rec.when > latest[rec.checker].when:
+            latest[rec.checker] = rec
+    return latest
+
+
+def plot_preview(records: list[Record]) -> None:
+    """Render a static chart image (1200x630) used as the Open Graph preview."""
+    by_checker: dict[str, list[Record]] = {}
+    for rec in records:
+        by_checker.setdefault(rec.checker, []).append(rec)
+
+    fig, ax = plt.subplots(figsize=(12, 6.3), dpi=100)
+    for checker, recs in sorted(by_checker.items()):
+        ax.plot(
+            [r.when for r in recs],
+            [r.pass_rate for r in recs],
+            marker=".",
+            markersize=7,
+            linewidth=2,
+            label=checker,
+        )
+    ax.set_ylim(0, 105)
+    ax.set_title(SITE_TITLE, fontsize=22)
+    ax.set_ylabel("Pass rate (%)", fontsize=15)
+    ax.tick_params(labelsize=12)
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=12, loc="center left", bbox_to_anchor=(1.0, 0.5))
+    fig.tight_layout()
+    fig.savefig(PREVIEW_PATH)
+    plt.close(fig)
+    print(f"wrote {PREVIEW_PATH}")
+
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Python Typing Conformance Trend</title>
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <title>__TITLE__</title>
+    <meta name="description" content="__DESC__">
+    <link rel="canonical" href="__SITE_URL__">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="__TITLE__">
+    <meta property="og:title" content="__TITLE__">
+    <meta property="og:description" content="__DESC__">
+    <meta property="og:url" content="__SITE_URL__">
+    <meta property="og:image" content="__SITE_URL__preview.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="__TITLE__">
+    <meta name="twitter:description" content="__DESC__">
+    <meta name="twitter:image" content="__SITE_URL__preview.png">
+    <script type="application/ld+json">__JSONLD__</script>
+    <script src="https://cdn.plot.ly/plotly-basic-2.35.2.min.js" charset="utf-8"></script>
     <style>
-        body { font-family: system-ui, "Segoe UI", Helvetica, Arial, sans-serif; margin: 0; }
-        header { padding: 1rem 1.5rem 0; }
-        h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
-        p { margin: 0.25rem 0; color: #555; font-size: 0.9rem; }
-        #chart { width: 100%; height: 82vh; }
-        footer { padding: 0.5rem 1.5rem 1rem; color: #888; font-size: 0.8rem; }
+        body { font-family: system-ui, "Segoe UI", Helvetica, Arial, sans-serif; margin: 0; color: #1a1a1a; }
+        header, main, footer { max-width: 960px; margin: 0 auto; padding: 0 1.5rem; }
+        header { padding-top: 1.5rem; }
+        h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+        h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+        p { margin: 0.4rem 0; color: #444; font-size: 0.95rem; line-height: 1.6; }
+        #chart { width: 100%; height: 75vh; min-height: 400px; }
+        table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.95rem; }
+        th, td { padding: 0.35rem 1rem; text-align: left; border-bottom: 1px solid #e2e2e2; }
+        th { color: #555; font-weight: 600; }
+        td.rate { font-variant-numeric: tabular-nums; }
+        tbody tr:hover { background: #f6f6f6; }
+        .note { color: #777; font-size: 0.85rem; }
+        footer { padding: 1rem 1.5rem 2rem; color: #888; font-size: 0.8rem; }
     </style>
 </head>
 <body>
     <header>
-        <h1>Python typing conformance test pass rate over time</h1>
+        <h1>Python type checker conformance trend</h1>
         <p>
-            A point is added whenever a type checker's version or pass rate changes, based on the history of
-            <a href="https://github.com/__REPO__/commits/main/__RESULTS_PATH__">__RESULTS_PATH__</a>
-            in <a href="https://github.com/__REPO__">__REPO__</a>.
-            Hover a point for details, click legend entries to toggle lines, drag to zoom.
+            This page tracks how well popular Python type checkers &mdash; mypy, pyright, ty,
+            zuban, pyrefly and pycroscope &mdash; conform to the official
+            <a href="https://typing.python.org/en/latest/conformance/results.html">Python typing
+            specification conformance test suite</a> over time.
+            A point is added whenever a checker's version or pass rate changes.
+            Hover a point for the exact version and commit, click legend entries to toggle
+            lines, drag to zoom.
         </p>
     </header>
     <div id="chart"></div>
+    <noscript><p>The interactive chart requires JavaScript; the latest results are listed below.</p></noscript>
+    <main>
+        <section>
+            <h2>Latest results</h2>
+            <p>Pass rates from the most recent published conformance run
+            (<time datetime="__AS_OF__">__AS_OF__</time>):</p>
+            <table>
+                <thead>
+                    <tr><th>#</th><th>Type checker</th><th>Version</th><th>Pass rate</th></tr>
+                </thead>
+                <tbody>
+__SNAPSHOT_ROWS__
+                </tbody>
+            </table>
+            <p class="note">__RETIRED__ also appeared in the suite in the past but were removed later.</p>
+        </section>
+        <section>
+            <h2>How the data is built</h2>
+            <p>
+                Every data point is extracted from the git history of
+                <a href="https://github.com/__REPO__/commits/main/__RESULTS_PATH__">__RESULTS_PATH__</a>
+                in the <a href="https://github.com/__REPO__">__REPO__</a> repository. The pass rate
+                follows the suite's own convention: (Pass + 0.5 &times; Partial) / total tests.
+                Note that the test suite itself grows over time (from 42 to 145+ tests), so pass
+                rates across distant dates are not strictly comparable.
+            </p>
+            <p>
+                The chart is regenerated weekly by GitHub Actions. The underlying data points are
+                available as <a href="trend.csv">trend.csv</a>, and the source code lives on
+                <a href="__SITE_REPO_URL__">GitHub</a>.
+            </p>
+        </section>
+    </main>
     <footer>Generated __GENERATED__ · __POINTS__ data points</footer>
     <script>
         const DATA = __DATA__;
@@ -295,7 +415,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
-def write_html(records: list[Record]) -> None:
+def write_html(records: list[Record], raw_records: list[Record], generated: datetime) -> None:
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
         by_checker.setdefault(rec.checker, []).append(rec)
@@ -309,18 +429,81 @@ def write_html(records: list[Record]) -> None:
         }
         for checker, recs in sorted(by_checker.items())
     ]
-    html = (
-        HTML_TEMPLATE.replace("__DATA__", json.dumps(payload))
-        .replace("__GENERATED__", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-        .replace("__POINTS__", str(len(records)))
-        .replace("__REPO__", REPO)
-        .replace("__RESULTS_PATH__", RESULTS_PATH)
+
+    # Latest snapshot table: checkers present in the newest commit's results.
+    latest_sha = max(raw_records, key=lambda r: r.when).sha
+    current = {r.checker for r in raw_records if r.sha == latest_sha}
+    latest = _latest_per_checker(records)
+    snapshot = sorted((latest[c] for c in current), key=lambda r: r.pass_rate, reverse=True)
+    rows = "\n".join(
+        f'                    <tr><td>{i}</td><td>{r.checker}</td>'
+        f"<td>{r.version}</td><td class=\"rate\">{r.pass_rate:.1f}%</td></tr>"
+        for i, r in enumerate(snapshot, 1)
     )
+    retired = ", ".join(sorted(set(latest) - current)) or "None"
+    as_of = max(r.when for r in snapshot).date().isoformat()
+
+    jsonld = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "Dataset",
+            "name": SITE_TITLE,
+            "description": SITE_DESCRIPTION,
+            "url": SITE_URL,
+            "isBasedOn": f"https://github.com/{REPO}",
+            "keywords": ["Python", "typing", "type checker", "conformance", *sorted(by_checker)],
+            "variableMeasured": "conformance test pass rate (%)",
+            "dateModified": as_of,
+            "distribution": {
+                "@type": "DataDownload",
+                "contentUrl": f"{SITE_URL}trend.csv",
+                "encodingFormat": "text/csv",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    html = HTML_TEMPLATE
+    for key, value in {
+        "__DATA__": json.dumps(payload),
+        "__SNAPSHOT_ROWS__": rows,
+        "__RETIRED__": retired,
+        "__AS_OF__": as_of,
+        "__JSONLD__": jsonld,
+        "__GENERATED__": generated.strftime("%Y-%m-%d %H:%M UTC"),
+        "__POINTS__": str(len(records)),
+        "__TITLE__": SITE_TITLE,
+        "__DESC__": SITE_DESCRIPTION,
+        "__SITE_URL__": SITE_URL,
+        "__SITE_REPO_URL__": SITE_REPO_URL,
+        "__REPO__": REPO,
+        "__RESULTS_PATH__": RESULTS_PATH,
+    }.items():
+        html = html.replace(key, value)
     HTML_PATH.write_text(html, encoding="utf-8")
     print(f"wrote {HTML_PATH}")
 
 
+def write_static_files(generated: datetime) -> None:
+    ROBOTS_PATH.write_text(
+        f"User-agent: *\nAllow: /\n\nSitemap: {SITE_URL}sitemap.xml\n",
+        encoding="utf-8",
+    )
+    SITEMAP_PATH.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"  <url><loc>{SITE_URL}</loc><lastmod>{generated.date().isoformat()}</lastmod></url>\n"
+        "</urlset>\n",
+        encoding="utf-8",
+    )
+    print(f"wrote {ROBOTS_PATH} and {SITEMAP_PATH}")
+
+
 def main() -> None:
-    records = drop_repeats(dedupe(collect_records()))
+    raw_records = collect_records()
+    records = drop_repeats(dedupe(raw_records))
+    generated = datetime.now(timezone.utc)
     write_csv(records)
-    write_html(records)
+    write_html(records, raw_records, generated)
+    plot_preview(records)
+    write_static_files(generated)

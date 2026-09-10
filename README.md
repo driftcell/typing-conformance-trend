@@ -5,6 +5,8 @@ An interactive trend chart showing how well popular Python type checkers conform
 
 **[View the live chart](https://driftcell.github.io/typing-conformance-trend/)**
 
+![Python type checker conformance trend](preview.png)
+
 Each line is one type checker (mypy, pyright, ty, zuban, pyrefly, …). Hover a point to see the exact checker version, pass rate, and the commit it came from; click legend entries to toggle lines; drag to zoom.
 
 ## How the data is built

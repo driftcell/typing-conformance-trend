@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://driftcell.github.io/typing-conformance-trend/sitemap.xml
