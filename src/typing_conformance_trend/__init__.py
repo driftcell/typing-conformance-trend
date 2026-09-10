@@ -463,8 +463,10 @@ __SNAPSHOT_ROWS__
             line: { width: 1.5 },
         }));
 
-        // Alternating background bands for each suite-size era, plus a staggered
-        // "N tests" label for eras wide enough to hold one.
+        // Alternating background bands for each suite-size era, plus staggered
+        // "N tests" labels. Labels are recomputed on zoom: an era is labeled
+        // when the part of it inside the current view spans at least ~4% of
+        // the visible range, and the label is centered on that visible part.
         const shapes = ERAS.map((era, i) => ({
             type: "rect",
             xref: "x",
@@ -477,18 +479,40 @@ __SNAPSHOT_ROWS__
             line: { width: 0 },
             layer: "below",
         }));
-        const annotations = ERAS.filter(e => e.label).map((era, i) => ({
-            x: new Date((new Date(era.start).getTime() + new Date(era.end).getTime()) / 2),
-            y: i % 2 ? 0.93 : 0.99,
-            xref: "x",
-            yref: "paper",
-            yanchor: "top",
-            text: `${era.size} tests`,
-            showarrow: false,
-            font: { size: 10, color: "#8a97a8" },
-            bgcolor: "rgba(255, 255, 255, 0.85)",
-            borderpad: 2,
-        }));
+
+        const gd = document.getElementById("chart");
+        const dataX = DATA.flatMap(d => d.x.map(t => new Date(t).getTime()));
+        const dataRange = [Math.min(...dataX), Math.max(...dataX)];
+
+        function viewRange() {
+            const xa = gd.layout.xaxis || {};
+            if (xa.range && !xa.autorange) return xa.range.map(v => new Date(v).getTime());
+            return dataRange;
+        }
+
+        function eraAnnotations() {
+            const [v0, v1] = viewRange();
+            const span = v1 - v0;
+            return ERAS
+                .map(era => {
+                    const lo = Math.max(new Date(era.start).getTime(), v0);
+                    const hi = Math.min(new Date(era.end).getTime(), v1);
+                    return { era, lo, hi, frac: (hi - lo) / span };
+                })
+                .filter(o => o.frac >= 0.04)
+                .map((o, i) => ({
+                    x: new Date((o.lo + o.hi) / 2),
+                    y: i % 2 ? 0.93 : 0.99,
+                    xref: "x",
+                    yref: "paper",
+                    yanchor: "top",
+                    text: `${o.era.size} tests`,
+                    showarrow: false,
+                    font: { size: 10, color: "#8a97a8" },
+                    bgcolor: "rgba(255, 255, 255, 0.85)",
+                    borderpad: 2,
+                }));
+        }
 
         const layout = {
             xaxis: { title: "Date" },
@@ -497,10 +521,19 @@ __SNAPSHOT_ROWS__
             margin: { t: 20 },
             legend: { orientation: "v" },
             shapes,
-            annotations,
+            annotations: eraAnnotations(),
         };
 
-        Plotly.newPlot("chart", traces, layout, { responsive: true });
+        Plotly.newPlot(gd, traces, layout, { responsive: true }).then(() => {
+            let updating = false;
+            gd.on("plotly_relayout", () => {
+                if (updating) return; // triggered by our own annotation refresh
+                const next = eraAnnotations();
+                if (JSON.stringify(next) === JSON.stringify(gd.layout.annotations || [])) return;
+                updating = true;
+                Plotly.relayout(gd, { annotations: next }).then(() => { updating = false; });
+            });
+        });
     </script>
 </body>
 </html>
@@ -529,16 +562,10 @@ def write_html(
         for checker, recs in sorted(by_checker.items())
     ]
 
-    # Background bands: one per suite-size era; label an era only if it spans
-    # at least ~3% of the x range so early, rapidly-changing eras stay readable.
-    span = max(r.when for r in records) - min(r.when for r in records)
+    # Background bands: one per suite-size era. Which eras get an on-chart
+    # label is decided in the browser, based on the currently visible x range.
     eras_payload = [
-        {
-            "start": era.start.isoformat(),
-            "end": era.end.isoformat(),
-            "size": era.size,
-            "label": (era.end - era.start) / span >= 0.03,
-        }
+        {"start": era.start.isoformat(), "end": era.end.isoformat(), "size": era.size}
         for era in eras
     ]
 
