@@ -64,6 +64,11 @@ PARTIAL_CLASSES = {"partially-conformant"}
 FAIL_CLASSES = {"not-conformant", "nonconformant"}
 SCORE_CLASSES = PASS_CLASSES | PARTIAL_CLASSES | FAIL_CLASSES
 
+# Checkers whose lines are hidden by default (still toggleable via the legend):
+# those no longer present in the suite's latest run, plus basilisk, which
+# reached its score by gaming the tests.
+HIDDEN_BY_DEFAULT = {"basilisk"}
+
 
 @dataclass(frozen=True)
 class Record:
@@ -310,11 +315,19 @@ def _latest_per_checker(records: list[Record]) -> dict[str, Record]:
     return latest
 
 
-def plot_preview(records: list[Record], eras: list[SuiteEra]) -> None:
+def hidden_checkers(records: list[Record], raw_records: list[Record]) -> set[str]:
+    """Checkers hidden by default: retired from the suite, plus HIDDEN_BY_DEFAULT."""
+    latest_sha = max(raw_records, key=lambda r: r.when).sha
+    current = {r.checker for r in raw_records if r.sha == latest_sha}
+    return ({r.checker for r in records} - current) | HIDDEN_BY_DEFAULT
+
+
+def plot_preview(records: list[Record], eras: list[SuiteEra], hidden: set[str]) -> None:
     """Render a static chart image (1200x630) used as the Open Graph preview."""
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
-        by_checker.setdefault(rec.checker, []).append(rec)
+        if rec.checker not in hidden:
+            by_checker.setdefault(rec.checker, []).append(rec)
 
     fig, ax = plt.subplots(figsize=(12, 6.3), dpi=100)
     span = max(r.when for r in records) - min(r.when for r in records)
@@ -405,8 +418,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             specification conformance test suite</a> over time.
             A point is added whenever a checker's version or pass rate changes.
             Shaded background bands mark periods in which the test suite had the same
-            number of tests (labeled at the top). Hover a point for the exact version
-            and commit, click legend entries to toggle lines, drag to zoom.
+            number of tests (labeled at the top). Checkers no longer run by the suite
+            are hidden by default. Hover a point for the exact version and commit,
+            click legend entries to toggle lines, drag to zoom.
         </p>
     </header>
     <div id="chart"></div>
@@ -424,7 +438,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 __SNAPSHOT_ROWS__
                 </tbody>
             </table>
-            <p class="note">__RETIRED__ also appeared in the suite in the past but were removed later.</p>
+            <p class="note">__RETIRED__ also appeared in the suite in the past but were removed
+            later; their lines are hidden by default (click a legend entry to show one).</p>
         </section>
         <section>
             <h2>How the data is built</h2>
@@ -461,6 +476,7 @@ __SNAPSHOT_ROWS__
             hoverinfo: "text",
             marker: { size: 5 },
             line: { width: 1.5 },
+            visible: d.hidden ? "legendonly" : true,
         }));
 
         // Alternating background bands for each suite-size era, plus staggered
@@ -546,6 +562,7 @@ def write_html(
     generated: datetime,
     eras: list[SuiteEra],
     size_by_sha: dict[str, int],
+    hidden: set[str],
 ) -> None:
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
@@ -558,6 +575,7 @@ def write_html(
             "version": [r.version for r in recs],
             "sha": [r.sha for r in recs],
             "tests": [size_by_sha.get(r.sha) for r in recs],
+            "hidden": checker in hidden,
         }
         for checker, recs in sorted(by_checker.items())
     ]
@@ -644,8 +662,9 @@ def main() -> None:
     records = drop_repeats(dedupe(raw_records))
     eras = suite_eras([(when, size) for when, _, size in suite_sizes])
     size_by_sha = {sha: size for _, sha, size in suite_sizes}
+    hidden = hidden_checkers(records, raw_records)
     generated = datetime.now(timezone.utc)
     write_csv(records)
-    write_html(records, raw_records, generated, eras, size_by_sha)
-    plot_preview(records, eras)
+    write_html(records, raw_records, generated, eras, size_by_sha, hidden)
+    plot_preview(records, eras, hidden)
     write_static_files(generated)
