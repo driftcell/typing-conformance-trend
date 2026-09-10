@@ -17,5 +17,6 @@ Each line is one type checker (mypy, pyright, ty, zuban, pyrefly, …). Hover a 
 - A point is added whenever a checker's version or pass rate changes (within a day, the latest commit wins), so flat segments stay clean.
 - Pass rate = (Pass + 0.5 × Partial) / total tests, matching the suite's own scoring convention.
 - The test suite itself grows over time (from 42 to 145+ tests): shaded background bands mark the periods with a constant number of tests, so pass rates across band boundaries are not strictly comparable.
+- Test files are also edited in place without changing the test count (assertions relaxed or tightened, expectations clarified) — in fact far more often than the suite grows. These edits are detected via the git tree hash of [`conformance/tests`](https://github.com/python/typing/tree/main/conformance/tests) at every published run and drawn as dotted vertical lines; pass rates across such a line are not strictly comparable either. Hover a point on a marked run to see the edit's commit messages.
 
 The chart is regenerated and republished automatically every Monday (UTC) via GitHub Actions.

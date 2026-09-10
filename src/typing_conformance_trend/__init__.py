@@ -9,6 +9,12 @@ and version (the latest commit of that day), then drop points that repeat
 the previous point's version and pass rate — a point on the chart means the
 checker's version or its pass rate changed.
 
+A blobless git clone of the repository (cached in ``data/typing-repo``)
+additionally fingerprints ``conformance/tests`` at every results commit via
+its git tree hash: runs where the fingerprint changed while the test count
+stayed the same are drawn as dotted vertical lines, since such edits also
+break comparability.
+
 Outputs:
 - ``index.html`` — self-contained interactive chart (Plotly.js basic bundle
   via CDN) with SEO meta tags, JSON-LD structured data and a crawlable
@@ -23,9 +29,11 @@ from __future__ import annotations
 import csv
 import json
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from html import escape as html_escape
 from pathlib import Path
 
 import matplotlib
@@ -39,6 +47,7 @@ from bs4 import BeautifulSoup
 
 REPO = "python/typing"
 RESULTS_PATH = "conformance/results/results.html"
+TESTS_PATH = "conformance/tests"
 API_URL = f"https://api.github.com/repos/{REPO}/commits"
 RAW_URL = f"https://raw.githubusercontent.com/{REPO}"
 
@@ -53,6 +62,7 @@ SITE_DESCRIPTION = (
 DATA_DIR = Path("data")
 HTML_DIR = DATA_DIR / "html"
 COMMITS_JSON = DATA_DIR / "commits.json"
+TYPING_REPO_DIR = DATA_DIR / "typing-repo"
 CSV_PATH = Path("trend.csv")
 HTML_PATH = Path("index.html")
 PREVIEW_PATH = Path("preview.png")
@@ -90,6 +100,107 @@ class SuiteEra:
     start: datetime
     end: datetime
     size: int
+
+
+@dataclass(frozen=True)
+class ContentMarker:
+    """A results run whose test files were edited while the number of tests
+    stayed the same (so the suite-size eras alone would not reveal it)."""
+
+    when: datetime
+    sha: str
+    size: int
+    subjects: list[str]
+
+
+def ensure_typing_repo() -> Path | None:
+    """Clone (or update) a blobless, checkout-less mirror of python/typing.
+
+    The clone lets us fingerprint the contents of conformance/tests at any
+    commit via git tree hashes without downloading file contents. Cached in
+    data/typing-repo, which rides along in the CI cache of data/."""
+    try:
+        if (TYPING_REPO_DIR / ".git").exists():
+            subprocess.run(
+                ["git", "fetch", "--filter=blob:none", "origin", "main"],
+                cwd=TYPING_REPO_DIR,
+                check=True,
+                capture_output=True,
+                timeout=600,
+            )
+        else:
+            DATA_DIR.mkdir(exist_ok=True)
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    f"https://github.com/{REPO}",
+                    str(TYPING_REPO_DIR),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=600,
+            )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"warning: python/typing clone unavailable ({e}); skipping test-content markers")
+        return None
+    return TYPING_REPO_DIR
+
+
+def tests_tree_id(repo: Path, sha: str) -> str | None:
+    """Tree object id of conformance/tests at the given commit.
+
+    A git tree hash covers the directory's exact contents (file names, modes
+    and, recursively, blob hashes), so any edit to a test file flips it even
+    when the number of tests is unchanged."""
+    out = subprocess.run(
+        ["git", "ls-tree", sha, "conformance/"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        if line.endswith(f"\t{TESTS_PATH}"):
+            return line.split()[2]
+    return None
+
+
+def test_edit_subjects(repo: Path, prev_sha: str, sha: str) -> list[str]:
+    """Commit messages touching conformance/tests between two results runs."""
+    out = subprocess.run(
+        ["git", "log", "--first-parent", "--format=%s", f"{prev_sha}..{sha}", "--", TESTS_PATH],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return []
+    return [line for line in out.stdout.splitlines() if line]
+
+
+def content_markers(repo: Path, suite_sizes: list[tuple[datetime, str, int]]) -> list[ContentMarker]:
+    """Detect test-content changes hidden behind a constant suite size.
+
+    The test fingerprint (tree hash) is sampled at every results.html commit;
+    a marker is added when the fingerprint changed versus the previous results
+    commit but the parsed suite size did not. Boundaries where the size changed
+    are already visible as era boundaries and get no marker."""
+    markers: list[ContentMarker] = []
+    prev: tuple[str, str, int] | None = None  # (sha, tree id, size)
+    for when, sha, size in sorted(suite_sizes):
+        tree = tests_tree_id(repo, sha)
+        if tree is None:
+            continue
+        if prev is not None:
+            psha, ptree, psize = prev
+            if tree != ptree and size == psize:
+                markers.append(ContentMarker(when, sha, size, test_edit_subjects(repo, psha, sha)))
+        prev = (sha, tree, size)
+    return markers
 
 
 def fetch_commits(session: requests.Session) -> list[dict]:
@@ -342,7 +453,12 @@ def hidden_checkers(records: list[Record], raw_records: list[Record]) -> set[str
     return ({r.checker for r in records} - current) | HIDDEN_BY_DEFAULT
 
 
-def plot_preview(records: list[Record], eras: list[SuiteEra], hidden: set[str]) -> None:
+def plot_preview(
+    records: list[Record],
+    eras: list[SuiteEra],
+    hidden: set[str],
+    markers: list[ContentMarker],
+) -> None:
     """Render a static chart image (1200x630) used as the Open Graph preview."""
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
@@ -366,6 +482,8 @@ def plot_preview(records: list[Record], eras: list[SuiteEra], hidden: set[str]) 
                 bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none", "pad": 1.5},
             )
             labeled += 1
+    for marker in markers:
+        ax.axvline(marker.when, color="#5a5a5a", alpha=0.25, linewidth=0.8, linestyle=":")
     for checker, recs in sorted(by_checker.items()):
         ax.plot(
             [r.when for r in recs],
@@ -440,9 +558,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             specification conformance test suite</a> over time.
             A point is added whenever a checker's version or pass rate changes.
             Shaded background bands mark periods in which the test suite had the same
-            number of tests (labeled at the top). Checkers no longer run by the suite
-            are hidden by default. Hover a point for the exact version and commit,
-            click legend entries to toggle lines, drag to zoom.
+            number of tests (labeled at the top). Dotted vertical lines mark conformance
+            runs where test files were edited without changing the number of tests
+            (hover a point on such a run for the commit messages). Checkers no longer
+            run by the suite are hidden by default. Hover a point for the exact version
+            and commit, click legend entries to toggle lines, drag to zoom.
         </p>
     </header>
     <div id="chart"></div>
@@ -472,6 +592,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 across band boundaries are not strictly comparable.
             </p>
             <p>
+                The number of tests is not the whole story: the test files are also edited
+                in place (assertions relaxed or tightened, expectations clarified) far more
+                often than the suite grows. These edits are detected via the git tree hash of
+                <a href="https://github.com/__REPO__/tree/main/conformance/tests">conformance/tests</a>,
+                which fingerprints the directory's exact contents at every published run.
+                Dotted vertical lines mark runs where this fingerprint changed while the test
+                count stayed the same &mdash; pass rates across such a line are not strictly
+                comparable either.
+            </p>
+            <p>
                 The chart is regenerated weekly by GitHub Actions. The underlying data points are
                 available as <a href="trend.csv">trend.csv</a>, and the source code lives on
                 <a href="__SITE_REPO_URL__">GitHub</a>.
@@ -482,6 +612,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <script>
         const DATA = __DATA__;
         const ERAS = __ERAS__;
+        const MARKERS = __MARKERS__;
 
         const traces = DATA.map(d => ({
             type: "scatter",
@@ -491,6 +622,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             y: d.y,
             text: d.version.map((v, i) =>
                 `${d.checker} ${v}<br>${d.x[i].slice(0, 10)} · ${d.y[i].toFixed(1)}% of ${d.tests[i] ?? "?"} tests<br>commit ${d.sha[i].slice(0, 7)}`
+                + (MARKERS[d.x[i]] ? `<br>⚠ ${MARKERS[d.x[i]]}` : "")
             ),
             hoverinfo: "text",
             marker: { size: 5 },
@@ -502,6 +634,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // "N tests" labels. Labels are recomputed on zoom: an era is labeled
         // when the part of it inside the current view spans at least ~4% of
         // the visible range, and the label is centered on that visible part.
+        // Dotted vertical lines: test files edited while the suite size stayed
+        // the same (details in the hover text of points on that run).
         const shapes = ERAS.map((era, i) => ({
             type: "rect",
             xref: "x",
@@ -513,7 +647,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             fillcolor: i % 2 ? "rgba(80, 120, 180, 0.10)" : "rgba(80, 120, 180, 0.04)",
             line: { width: 0 },
             layer: "below",
-        }));
+        })).concat(Object.keys(MARKERS).map(x => ({
+            type: "line",
+            xref: "x",
+            yref: "paper",
+            x0: x,
+            x1: x,
+            y0: 0,
+            y1: 1,
+            line: { color: "rgba(90, 90, 90, 0.35)", width: 1, dash: "dot" },
+            layer: "below",
+        })));
 
         const gd = document.getElementById("chart");
         const dataX = DATA.flatMap(d => d.x.map(t => new Date(t).getTime()));
@@ -584,6 +728,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 """
 
 
+def _marker_notes(markers: list[ContentMarker]) -> dict[str, str]:
+    """Hover note per run (keyed by the run's ISO timestamp) explaining that the
+    test files were edited behind a constant suite size, with the edit subjects."""
+    notes: dict[str, str] = {}
+    for m in markers:
+        subs = [html_escape(s, quote=False) for s in m.subjects]
+        shown = "; ".join(subs[:2])
+        if len(subs) > 2:
+            shown += f"; … and {len(subs) - 2} more"
+        note = f"tests edited, still {m.size} tests"
+        if shown:
+            note += f": {shown}"
+        notes[m.when.isoformat()] = note
+    return notes
+
+
 def write_html(
     records: list[Record],
     raw_records: list[Record],
@@ -591,6 +751,7 @@ def write_html(
     eras: list[SuiteEra],
     size_by_sha: dict[str, int],
     hidden: set[str],
+    markers: list[ContentMarker],
 ) -> None:
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
@@ -647,6 +808,7 @@ def write_html(
     for key, value in {
         "__DATA__": json.dumps(payload),
         "__ERAS__": json.dumps(eras_payload),
+        "__MARKERS__": json.dumps(_marker_notes(markers), ensure_ascii=False),
         "__RESULTS_SRCDOC__": results_srcdoc(latest_sha),
         "__RETIRED__": retired,
         "__AS_OF__": as_of,
@@ -687,7 +849,11 @@ def main() -> None:
     size_by_sha = {sha: size for _, sha, size in suite_sizes}
     hidden = hidden_checkers(records, raw_records)
     generated = datetime.now(timezone.utc)
+    repo = ensure_typing_repo()
+    markers = content_markers(repo, suite_sizes) if repo else []
+    if markers:
+        print(f"found {len(markers)} test-content changes at constant suite size")
     write_csv(records)
-    write_html(records, raw_records, generated, eras, size_by_sha, hidden)
-    plot_preview(records, eras, hidden)
+    write_html(records, raw_records, generated, eras, size_by_sha, hidden, markers)
+    plot_preview(records, eras, hidden, markers)
     write_static_files(generated)
