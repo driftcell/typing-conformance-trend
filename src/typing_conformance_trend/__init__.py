@@ -25,7 +25,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import matplotlib
@@ -76,6 +76,15 @@ class Record:
     @property
     def day(self) -> str:
         return self.when.date().isoformat()
+
+
+@dataclass(frozen=True)
+class SuiteEra:
+    """A period during which the test suite had a constant number of tests."""
+
+    start: datetime
+    end: datetime
+    size: int
 
 
 def fetch_commits(session: requests.Session) -> list[dict]:
@@ -146,14 +155,17 @@ def _score_cells(cells: list) -> float | None:
     return (passed + 0.5 * partial) / total * 100
 
 
-def parse_results(html: str) -> list[tuple[str, str, float]]:
-    """Extract (checker name, version, pass rate) from one results.html.
+def parse_results(html: str) -> tuple[list[tuple[str, str, float]], int | None]:
+    """Extract (checker name, version, pass rate) plus suite size from one results.html.
 
     The file went through three layout eras:
     1. 2023-12: one table per checker, ``.tc-name`` outside the tables.
     2. ~2024 to 2026-06: a single multi-column table, ``.tc-name`` in ``th.tc-header``.
     3. 2026-06+: restyled single table with ``thead`` headers and a ``tfoot``
        row containing official totals like ``108.5 / 145 • 74.8%``.
+
+    The suite size is the tfoot denominator (era 3) or the per-checker count of
+    scored cells (eras 1-2, taking the max in case a checker skips tests).
     """
     soup = BeautifulSoup(html, "html.parser")
     for node in soup.select(".tc-time"):
@@ -165,15 +177,18 @@ def parse_results(html: str) -> list[tuple[str, str, float]]:
     if headers and tfoot:
         totals = [td.get_text(strip=True) for td in tfoot.find_all("td") if td.get_text(strip=True)]
         rows = []
+        sizes = []
         for header, total in zip(headers, totals):
             m = re.search(r"([\d.]+)\s*/\s*([\d.]+)", total)
             if m:
                 rows.append((header, float(m.group(1)) / float(m.group(2)) * 100))
-        return _named(rows)
+                sizes.append(int(float(m.group(2))))
+        return _named(rows), max(sizes, default=None)
 
     # Eras 1-2: count Pass / Partial / Fail cells.
     name_nodes = soup.select(".tc-name")
     rows = []
+    sizes = []
     if name_nodes and name_nodes[0].find_parent("table") is None:
         # Era 1: each .tc-name is followed by its own table.
         for node in name_nodes:
@@ -182,6 +197,7 @@ def parse_results(html: str) -> list[tuple[str, str, float]]:
             rate = _score_cells(cells)
             if rate is not None:
                 rows.append((node.get_text(strip=True), rate))
+                sizes.append(len(cells))
     else:
         # Era 2: one shared table, cells appear in column order.
         n = len(name_nodes)
@@ -194,7 +210,8 @@ def parse_results(html: str) -> list[tuple[str, str, float]]:
             rate = _score_cells(cells)
             if rate is not None:
                 rows.append((node.get_text(strip=True), rate))
-    return _named(rows)
+                sizes.append(len(cells))
+    return _named(rows), max(sizes, default=None)
 
 
 def _named(rows: list[tuple[str, float]]) -> list[tuple[str, str, float]]:
@@ -206,20 +223,47 @@ def _named(rows: list[tuple[str, float]]) -> list[tuple[str, str, float]]:
     return out
 
 
-def collect_records() -> list[Record]:
+def collect_records() -> tuple[list[Record], list[tuple[datetime, str, int]]]:
     session = requests.Session()
     commits = fetch_commits(session)
     commits.sort(key=lambda c: c["commit"]["committer"]["date"])
     records: list[Record] = []
+    suite_sizes: list[tuple[datetime, str, int]] = []
     for i, commit in enumerate(commits, 1):
         sha = commit["sha"]
         when = datetime.fromisoformat(commit["commit"]["committer"]["date"].replace("Z", "+00:00"))
         html = download_html(session, sha)
-        for checker, version, rate in parse_results(html):
+        rows, size = parse_results(html)
+        for checker, version, rate in rows:
             records.append(Record(when, checker, version, rate, sha))
+        if size is not None:
+            suite_sizes.append((when, sha, size))
         if i % 20 == 0 or i == len(commits):
             print(f"processed {i}/{len(commits)} commits", flush=True)
-    return records
+    return records, suite_sizes
+
+
+def suite_eras(sizes: list[tuple[datetime, int]]) -> list[SuiteEra]:
+    """Merge consecutive commits with the same suite size into eras.
+
+    Each era runs from the first commit with its size up to the first commit of
+    the next era; the last era ends at the newest commit (padded a little so the
+    band stays visible when the newest commit itself changed the size).
+    """
+    eras: list[SuiteEra] = []
+    for when, size in sorted(sizes):
+        if eras and eras[-1].size == size:
+            continue
+        eras.append(SuiteEra(when, when, size))
+    for i in range(len(eras) - 1):
+        eras[i] = SuiteEra(eras[i].start, eras[i + 1].start, eras[i].size)
+    if eras:
+        last = eras[-1]
+        end = max(when for when, _ in sizes)
+        if end <= last.start:
+            end = last.start + timedelta(days=5)
+        eras[-1] = SuiteEra(last.start, end, last.size)
+    return eras
 
 
 def dedupe(records: list[Record]) -> list[Record]:
@@ -266,13 +310,29 @@ def _latest_per_checker(records: list[Record]) -> dict[str, Record]:
     return latest
 
 
-def plot_preview(records: list[Record]) -> None:
+def plot_preview(records: list[Record], eras: list[SuiteEra]) -> None:
     """Render a static chart image (1200x630) used as the Open Graph preview."""
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
         by_checker.setdefault(rec.checker, []).append(rec)
 
     fig, ax = plt.subplots(figsize=(12, 6.3), dpi=100)
+    span = max(r.when for r in records) - min(r.when for r in records)
+    labeled = 0
+    for i, era in enumerate(eras):
+        ax.axvspan(era.start, era.end, color="#5078b4", alpha=0.1 if i % 2 else 0.04, linewidth=0)
+        if (era.end - era.start) / span >= 0.03:
+            ax.text(
+                era.start + (era.end - era.start) / 2,
+                101 if labeled % 2 else 96,
+                f"{era.size} tests",
+                ha="center",
+                va="top",
+                fontsize=9,
+                color="#8a97a8",
+                bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none", "pad": 1.5},
+            )
+            labeled += 1
     for checker, recs in sorted(by_checker.items()):
         ax.plot(
             [r.when for r in recs],
@@ -344,8 +404,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <a href="https://typing.python.org/en/latest/conformance/results.html">Python typing
             specification conformance test suite</a> over time.
             A point is added whenever a checker's version or pass rate changes.
-            Hover a point for the exact version and commit, click legend entries to toggle
-            lines, drag to zoom.
+            Shaded background bands mark periods in which the test suite had the same
+            number of tests (labeled at the top). Hover a point for the exact version
+            and commit, click legend entries to toggle lines, drag to zoom.
         </p>
     </header>
     <div id="chart"></div>
@@ -372,8 +433,9 @@ __SNAPSHOT_ROWS__
                 <a href="https://github.com/__REPO__/commits/main/__RESULTS_PATH__">__RESULTS_PATH__</a>
                 in the <a href="https://github.com/__REPO__">__REPO__</a> repository. The pass rate
                 follows the suite's own convention: (Pass + 0.5 &times; Partial) / total tests.
-                Note that the test suite itself grows over time (from 42 to 145+ tests), so pass
-                rates across distant dates are not strictly comparable.
+                Note that the test suite itself grows over time (from 42 to 145+ tests); the
+                shaded bands delimit periods with a constant number of tests, so pass rates
+                across band boundaries are not strictly comparable.
             </p>
             <p>
                 The chart is regenerated weekly by GitHub Actions. The underlying data points are
@@ -385,6 +447,7 @@ __SNAPSHOT_ROWS__
     <footer>Generated __GENERATED__ · __POINTS__ data points</footer>
     <script>
         const DATA = __DATA__;
+        const ERAS = __ERAS__;
 
         const traces = DATA.map(d => ({
             type: "scatter",
@@ -393,11 +456,38 @@ __SNAPSHOT_ROWS__
             x: d.x,
             y: d.y,
             text: d.version.map((v, i) =>
-                `${d.checker} ${v}<br>${d.x[i].slice(0, 10)} · ${d.y[i].toFixed(1)}%<br>commit ${d.sha[i].slice(0, 7)}`
+                `${d.checker} ${v}<br>${d.x[i].slice(0, 10)} · ${d.y[i].toFixed(1)}% of ${d.tests[i] ?? "?"} tests<br>commit ${d.sha[i].slice(0, 7)}`
             ),
             hoverinfo: "text",
             marker: { size: 5 },
             line: { width: 1.5 },
+        }));
+
+        // Alternating background bands for each suite-size era, plus a staggered
+        // "N tests" label for eras wide enough to hold one.
+        const shapes = ERAS.map((era, i) => ({
+            type: "rect",
+            xref: "x",
+            yref: "paper",
+            x0: era.start,
+            x1: era.end,
+            y0: 0,
+            y1: 1,
+            fillcolor: i % 2 ? "rgba(80, 120, 180, 0.10)" : "rgba(80, 120, 180, 0.04)",
+            line: { width: 0 },
+            layer: "below",
+        }));
+        const annotations = ERAS.filter(e => e.label).map((era, i) => ({
+            x: new Date((new Date(era.start).getTime() + new Date(era.end).getTime()) / 2),
+            y: i % 2 ? 0.93 : 0.99,
+            xref: "x",
+            yref: "paper",
+            yanchor: "top",
+            text: `${era.size} tests`,
+            showarrow: false,
+            font: { size: 10, color: "#8a97a8" },
+            bgcolor: "rgba(255, 255, 255, 0.85)",
+            borderpad: 2,
         }));
 
         const layout = {
@@ -406,6 +496,8 @@ __SNAPSHOT_ROWS__
             hovermode: "closest",
             margin: { t: 20 },
             legend: { orientation: "v" },
+            shapes,
+            annotations,
         };
 
         Plotly.newPlot("chart", traces, layout, { responsive: true });
@@ -415,7 +507,13 @@ __SNAPSHOT_ROWS__
 """
 
 
-def write_html(records: list[Record], raw_records: list[Record], generated: datetime) -> None:
+def write_html(
+    records: list[Record],
+    raw_records: list[Record],
+    generated: datetime,
+    eras: list[SuiteEra],
+    size_by_sha: dict[str, int],
+) -> None:
     by_checker: dict[str, list[Record]] = {}
     for rec in records:
         by_checker.setdefault(rec.checker, []).append(rec)
@@ -426,8 +524,22 @@ def write_html(records: list[Record], raw_records: list[Record], generated: date
             "y": [round(r.pass_rate, 2) for r in recs],
             "version": [r.version for r in recs],
             "sha": [r.sha for r in recs],
+            "tests": [size_by_sha.get(r.sha) for r in recs],
         }
         for checker, recs in sorted(by_checker.items())
+    ]
+
+    # Background bands: one per suite-size era; label an era only if it spans
+    # at least ~3% of the x range so early, rapidly-changing eras stay readable.
+    span = max(r.when for r in records) - min(r.when for r in records)
+    eras_payload = [
+        {
+            "start": era.start.isoformat(),
+            "end": era.end.isoformat(),
+            "size": era.size,
+            "label": (era.end - era.start) / span >= 0.03,
+        }
+        for era in eras
     ]
 
     # Latest snapshot table: checkers present in the newest commit's results.
@@ -466,6 +578,7 @@ def write_html(records: list[Record], raw_records: list[Record], generated: date
     html = HTML_TEMPLATE
     for key, value in {
         "__DATA__": json.dumps(payload),
+        "__ERAS__": json.dumps(eras_payload),
         "__SNAPSHOT_ROWS__": rows,
         "__RETIRED__": retired,
         "__AS_OF__": as_of,
@@ -500,10 +613,12 @@ def write_static_files(generated: datetime) -> None:
 
 
 def main() -> None:
-    raw_records = collect_records()
+    raw_records, suite_sizes = collect_records()
     records = drop_repeats(dedupe(raw_records))
+    eras = suite_eras([(when, size) for when, _, size in suite_sizes])
+    size_by_sha = {sha: size for _, sha, size in suite_sizes}
     generated = datetime.now(timezone.utc)
     write_csv(records)
-    write_html(records, raw_records, generated)
-    plot_preview(records)
+    write_html(records, raw_records, generated, eras, size_by_sha)
+    plot_preview(records, eras)
     write_static_files(generated)

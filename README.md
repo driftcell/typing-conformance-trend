@@ -16,6 +16,6 @@ Each line is one type checker (mypy, pyright, ty, zuban, pyrefly, …). Hover a 
 - X axis: commit date. Y axis: pass rate (%).
 - A point is added whenever a checker's version or pass rate changes (within a day, the latest commit wins), so flat segments stay clean.
 - Pass rate = (Pass + 0.5 × Partial) / total tests, matching the suite's own scoring convention.
-- Note: the test suite itself grows over time (from 42 to 145+ tests), so pass rates across distant dates are not strictly comparable.
+- The test suite itself grows over time (from 42 to 145+ tests): shaded background bands mark the periods with a constant number of tests, so pass rates across band boundaries are not strictly comparable.
 
 The chart is regenerated and republished automatically every Monday (UTC) via GitHub Actions.
