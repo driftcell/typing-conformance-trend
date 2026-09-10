@@ -1,7 +1,7 @@
 # Typing Conformance Trend
 
 An interactive trend chart showing how well popular Python type checkers conform to the official
-[Python typing specification conformance test suite](https://typing.python.org/en/latest/conformance/results.html) over time.
+[Python typing specification conformance test suite](https://github.com/python/typing/blob/main/conformance/results/results.html) over time.
 
 **[View the live chart](https://driftcell.github.io/typing-conformance-trend/)**
 

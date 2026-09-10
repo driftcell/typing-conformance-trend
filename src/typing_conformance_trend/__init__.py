@@ -415,7 +415,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <p>
             This page tracks how well popular Python type checkers &mdash; mypy, pyright, ty,
             zuban, pyrefly and pycroscope &mdash; conform to the official
-            <a href="https://typing.python.org/en/latest/conformance/results.html">Python typing
+            <a href="https://github.com/python/typing/blob/main/conformance/results/results.html">Python typing
             specification conformance test suite</a> over time.
             A point is added whenever a checker's version or pass rate changes.
             Shaded background bands mark periods in which the test suite had the same
